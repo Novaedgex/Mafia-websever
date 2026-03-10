@@ -24,24 +24,37 @@ app.post('/transcript', async (req, res) => {
     const token     = crypto.randomBytes(24).toString('hex');
     const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
 
-    const { error } = await supabase.from('Transcripts').insert([{
-        token,
-        html,
-        ticket_num:  ticketNum  || null,
-        ticket_type: ticketType || null,
-        author_id:   authorId   || null,
-        author_tag:  authorTag  || null,
-        claimer_tag: claimerTag || null,
-        closed_at:   closedAt   || new Date().toISOString(),
-        expires_at:  expiresAt,
-    }]);
+    console.log(`📄 Attempting Supabase insert for ticket #${ticketNum}...`);
+    console.log(`   supabaseUrl set: ${!!process.env.supabaseUrl}`);
+    console.log(`   supabaseKey set: ${!!process.env.supabaseKey}`);
 
-    if (error) {
-        console.error('❌ Supabase insert error:', JSON.stringify(error));
-        return res.status(500).json({ error: error.message });
+    let result;
+    try {
+        result = await supabase.from('Transcripts').insert([{
+            token,
+            html,
+            ticket_num:  ticketNum  || null,
+            ticket_type: ticketType || null,
+            author_id:   authorId   || null,
+            author_tag:  authorTag  || null,
+            claimer_tag: claimerTag || null,
+            closed_at:   closedAt   || new Date().toISOString(),
+            expires_at:  expiresAt,
+        }]);
+    } catch (err) {
+        console.error('❌ Supabase threw an exception:', err.message);
+        return res.status(500).json({ error: err.message });
     }
 
-    console.log(`📄 Transcript saved to Supabase: #${ticketNum} (${token})`);
+    if (result.error) {
+        console.error('❌ Supabase insert error code:', result.error.code);
+        console.error('❌ Supabase insert error message:', result.error.message);
+        console.error('❌ Supabase insert error details:', result.error.details);
+        console.error('❌ Supabase insert error hint:', result.error.hint);
+        return res.status(500).json({ error: result.error.message, details: result.error.details, hint: result.error.hint });
+    }
+
+    console.log(`✅ Transcript saved: #${ticketNum} (${token})`);
     return res.json({ token });
 });
 
