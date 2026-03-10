@@ -1,76 +1,92 @@
 require('dotenv').config();
 const express = require('express');
 const crypto  = require('crypto');
+const { createClient } = require('@supabase/supabase-js');
 
-const app    = express();
-const PORT   = process.env.PORT || 3000;
-const SECRET = process.env.TRANSCRIPT_SECRET;
+const app      = express();
+const PORT     = process.env.PORT || 3000;
+const SECRET   = process.env.TRANSCRIPT_SECRET;
+const supabase = createClient(process.env.supabaseUrl, process.env.supabaseKey);
 
-if (!SECRET) {
-    console.error('❌ TRANSCRIPT_SECRET env variable is not set!');
-    process.exit(1);
-}
-
-// In-memory store: token -> { html, expiresAt }
-const transcriptStore = new Map();
-
-// Clean up expired transcripts every hour
-setInterval(() => {
-    const now = Date.now();
-    for (const [token, data] of transcriptStore.entries()) {
-        if (data.expiresAt < now) transcriptStore.delete(token);
-    }
-}, 60 * 60 * 1000);
+if (!SECRET) { console.error('❌ TRANSCRIPT_SECRET not set!'); process.exit(1); }
+if (!process.env.supabaseUrl || !process.env.supabaseKey) { console.error('❌ Supabase env vars not set!'); process.exit(1); }
 
 app.use(express.json({ limit: '10mb' }));
 
-// ── POST /transcript — bot sends HTML here ──────────────────────
-app.post('/transcript', (req, res) => {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader || authHeader !== `Bearer ${SECRET}`) {
+// ── POST /transcript — bot sends transcript here ─────────────────
+app.post('/transcript', async (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${SECRET}`)
         return res.status(401).json({ error: 'Unauthorized' });
+
+    const { html, ticketNum, ticketType, authorId, authorTag, claimerTag, closedAt } = req.body;
+    if (!html) return res.status(400).json({ error: 'Missing html' });
+
+    const token     = crypto.randomBytes(24).toString('hex');
+    const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+
+    const { error } = await supabase.from('Transcripts').insert([{
+        token,
+        html,
+        ticket_num:  ticketNum  || null,
+        ticket_type: ticketType || null,
+        author_id:   authorId   || null,
+        author_tag:  authorTag  || null,
+        claimer_tag: claimerTag || null,
+        closed_at:   closedAt   || new Date().toISOString(),
+        expires_at:  expiresAt,
+    }]);
+
+    if (error) {
+        console.error('❌ Supabase insert error:', JSON.stringify(error));
+        return res.status(500).json({ error: error.message });
     }
 
-    const { html } = req.body;
-    if (!html) return res.status(400).json({ error: 'Missing html field' });
-
-    const token    = crypto.randomBytes(24).toString('hex');
-    const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days
-    transcriptStore.set(token, { html, expiresAt });
-
-    console.log(`📄 Transcript stored: ${token} (${transcriptStore.size} total)`);
+    console.log(`📄 Transcript saved to Supabase: #${ticketNum} (${token})`);
     return res.json({ token });
 });
 
-// ── GET /transcript/:token — anyone views transcript here ───────
-app.get('/transcript/:token', (req, res) => {
-    const entry = transcriptStore.get(req.params.token);
-    if (!entry) {
-        return res.status(404).send(`
-            <!DOCTYPE html><html><head><title>Not Found</title></head>
-            <body style="background:#111;color:#fff;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
-                <div style="text-align:center">
-                    <h1 style="font-size:48px;margin-bottom:8px">404</h1>
-                    <p style="color:#72767d">Transcript not found or has expired.</p>
-                </div>
-            </body></html>
-        `);
+// ── GET /transcript/:token — serve transcript page ───────────────
+app.get('/transcript/:token', async (req, res) => {
+    const { data, error } = await supabase
+        .from('Transcripts')
+        .select('html, expires_at')
+        .eq('token', req.params.token)
+        .single();
+
+    if (error || !data) {
+        return res.status(404).send(`<!DOCTYPE html><html><head><title>Not Found</title></head>
+        <body style="background:#313338;color:#dcddde;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            <div style="text-align:center">
+                <div style="font-size:64px;margin-bottom:16px">🔍</div>
+                <h1 style="font-size:24px;margin-bottom:8px;color:#f2f3f5">Transcript Not Found</h1>
+                <p style="color:#72767d">This transcript doesn't exist or has expired.</p>
+            </div>
+        </body></html>`);
     }
-    if (entry.expiresAt < Date.now()) {
-        transcriptStore.delete(req.params.token);
-        return res.status(404).send('Transcript expired.');
+
+    if (new Date(data.expires_at) < new Date()) {
+        await supabase.from('Transcripts').delete().eq('token', req.params.token);
+        return res.status(404).send(`<!DOCTYPE html><html><head><title>Expired</title></head>
+        <body style="background:#313338;color:#dcddde;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0">
+            <div style="text-align:center">
+                <div style="font-size:64px;margin-bottom:16px">⏰</div>
+                <h1 style="font-size:24px;margin-bottom:8px;color:#f2f3f5">Transcript Expired</h1>
+                <p style="color:#72767d">This transcript is older than 30 days and has been deleted.</p>
+            </div>
+        </body></html>`);
     }
+
     res.setHeader('Content-Type', 'text/html');
-    res.send(entry.html);
+    res.send(data.html);
 });
 
-// ── GET / — health check ────────────────────────────────────────
-app.get('/', (req, res) => {
-    res.json({
-        status: 'online',
-        transcripts: transcriptStore.size,
-        uptime: Math.floor(process.uptime()) + 's',
-    });
+// ── GET / — health check ─────────────────────────────────────────
+app.get('/', async (req, res) => {
+    const { count } = await supabase
+        .from('Transcripts')
+        .select('*', { count: 'exact', head: true })
+        .gt('expires_at', new Date().toISOString());
+    res.json({ status: 'online', active_transcripts: count ?? 0, uptime: Math.floor(process.uptime()) + 's' });
 });
 
 app.listen(PORT, () => console.log(`📄 Transcript server running on port ${PORT}`));
