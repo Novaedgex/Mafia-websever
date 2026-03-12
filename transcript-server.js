@@ -13,6 +13,10 @@ if (!process.env.supabaseUrl || !process.env.supabaseKey) { console.error('❌ S
 
 app.use(express.json({ limit: '10mb' }));
 
+// ── Visit counter (persists in memory, resets on restart) ────────
+let visitCount = 0;
+const serverStart = Date.now();
+
 // ── POST /transcript — bot sends transcript here ─────────────────
 app.post('/transcript', async (req, res) => {
     if (req.headers['authorization'] !== `Bearer ${SECRET}`)
@@ -60,6 +64,14 @@ app.post('/transcript', async (req, res) => {
 
 // ── GET /transcript/:token — serve transcript page ───────────────
 app.get('/transcript/:token', async (req, res) => {
+    visitCount++;
+    // Persist to Supabase (fire and forget)
+    supabase.from('Settings').select('id, transcript_views').limit(1).then(({ data }) => {
+        if (data?.[0]) {
+            const newCount = (data[0].transcript_views || 0) + 1;
+            supabase.from('Settings').update({ transcript_views: newCount }).eq('id', data[0].id).catch(() => {});
+        }
+    }).catch(() => {});
     const { data, error } = await supabase
         .from('Transcripts')
         .select('html, expires_at')
@@ -93,13 +105,19 @@ app.get('/transcript/:token', async (req, res) => {
     res.send(data.html);
 });
 
-// ── GET / — health check ─────────────────────────────────────────
+// ── GET / — health check (also used by bot /usage ping) ─────────
 app.get('/', async (req, res) => {
     const { count } = await supabase
         .from('Transcripts')
         .select('*', { count: 'exact', head: true })
         .gt('expires_at', new Date().toISOString());
-    res.json({ status: 'online', active_transcripts: count ?? 0, uptime: Math.floor(process.uptime()) + 's' });
+    res.json({
+        status:             'online',
+        active_transcripts: count ?? 0,
+        transcript_views:   visitCount,
+        uptime_seconds:     Math.floor(process.uptime()),
+        started_at:         new Date(serverStart).toISOString(),
+    });
 });
 
 app.listen(PORT, () => console.log(`📄 Transcript server running on port ${PORT}`));
