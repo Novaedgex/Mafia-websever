@@ -159,4 +159,34 @@ function notFoundPage(title,msg) {
     return `<!DOCTYPE html><html><head><title>${title}</title></head><body style="background:#313338;color:#dcddde;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:64px;margin-bottom:16px">🔍</div><h1 style="font-size:24px;margin-bottom:8px;color:#f2f3f5">${title}</h1><p style="color:#72767d">${msg}</p></div></body></html>`;
 }
 
+// ── Control panel — bot command relay ────────────────────────────
+// The dashboard POSTs here, server forwards to bot via WS broadcast
+// Bot must listen for 'control' WS messages (handled in bot.js)
+
+app.post('/control', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`)
+        return res.status(401).json({ error: 'Unauthorized' });
+    const { action, payload } = req.body;
+    if (!action) return res.status(400).json({ error: 'Missing action' });
+
+    // Broadcast to bot's WS connection (bot connects as a client)
+    broadcast('control', { action, payload });
+    res.json({ ok: true, action });
+});
+
+// GET /api/channels — bot pushes channel list here on startup, cached
+let channelCache = [];
+app.post('/api/channels', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${SECRET}`)
+        return res.status(401).json({ error: 'Unauthorized' });
+    channelCache = req.body.channels || [];
+    broadcast('channels', channelCache);
+    res.json({ ok: true });
+});
+app.get('/api/channels', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`)
+        return res.status(401).json({ error: 'Unauthorized' });
+    res.json(channelCache);
+});
+
 server.listen(PORT, () => console.log(`📄 Server running on port ${PORT}`));
