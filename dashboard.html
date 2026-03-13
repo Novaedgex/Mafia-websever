@@ -130,9 +130,8 @@ body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Co
 <div id="login-overlay">
   <h1>⚡ MAFIA MARKET</h1>
   <div style="color:var(--dim);font-size:11px;letter-spacing:2px;margin-bottom:8px">ADMIN DASHBOARD</div>
-  <input type="password" id="pw-input" placeholder="Dashboard password..." autocomplete="off">
-  <button onclick="doLogin()">Access Dashboard</button>
-  <div id="login-error">⚠ Invalid password — try again</div>
+  <div style="color:var(--dim);font-size:12px;margin-bottom:16px">Verifying your Discord session...</div>
+  <div id="login-error" style="color:var(--red);font-size:12px;display:none">⚠ Session invalid — redirecting...</div>
 </div>
 
 <div id="app">
@@ -140,9 +139,14 @@ body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Co
     <div class="logo">⚡ MAFIA MARKET</div>
     <div class="tbadge">ADMIN DASHBOARD</div>
     <div class="tbadge" id="session-badge">session: 0s</div>
-    <div class="ml" style="display:flex;align-items:center;gap:8px">
+    <div class="ml" style="display:flex;align-items:center;gap:12px">
       <div class="status-dot" id="status-dot"></div>
       <div class="status-label" id="status-label">connecting...</div>
+      <div style="display:flex;align-items:center;gap:8px;border-left:1px solid var(--border);padding-left:12px">
+        <img id="user-avatar" src="__AVATAR__" style="width:28px;height:28px;border-radius:50%;object-fit:cover">
+        <span style="color:var(--bright);font-size:12px;font-weight:bold" id="user-name">__USERNAME__</span>
+        <a href="/auth/logout" style="color:var(--dim);font-size:11px;text-decoration:none;border:1px solid var(--border);border-radius:4px;padding:1px 8px">logout</a>
+      </div>
     </div>
   </div>
 
@@ -197,20 +201,30 @@ body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Co
 </div>
 
 <script>
-let ws, dashSecret='', logCount=0, alertCount=0, warnCount=0, sessionStart=Date.now();
+let ws, logCount=0, alertCount=0, warnCount=0, sessionStart=Date.now();
 let channels=[], lockdownActive=false, raidModeActive=false, invitesLocked=false;
 const MAX_DOM=300;
 
-document.getElementById('pw-input').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
-function doLogin(){dashSecret=document.getElementById('pw-input').value;document.getElementById('login-error').style.display='none';connectWS();}
+// Get session token from cookie
+function getSessionToken(){
+  const m=document.cookie.split(';').find(c=>c.trim().startsWith('dash_session='));
+  return m?m.split('=')[1].trim():null;
+}
 
-function connectWS(){
+// Auto-connect on page load using session cookie
+window.addEventListener('load',()=>{
+  const tok=getSessionToken();
+  if(!tok){window.location.href='/auth/login';return;}
+  connectWS(tok);
+});
+
+function connectWS(tok){
   const proto=location.protocol==='https:'?'wss:':'ws:';
   ws=new WebSocket(proto+'//'+location.host);
-  ws.onopen=()=>ws.send(JSON.stringify({type:'auth',payload:{secret:dashSecret}}));
+  ws.onopen=()=>ws.send(JSON.stringify({type:'auth',payload:{sessionToken:tok}}));
   ws.onmessage=(e)=>{
     const{type,payload}=JSON.parse(e.data);
-    if(type==='auth_fail'){document.getElementById('login-error').style.display='block';ws.close();return;}
+    if(type==='auth_fail'){document.getElementById('login-error').style.display='block';setTimeout(()=>{window.location.href='/auth/login';},1500);ws.close();return;}
     if(type==='auth_ok'){
       document.getElementById('login-overlay').style.display='none';
       document.getElementById('app').style.display='flex';
@@ -224,7 +238,7 @@ function connectWS(){
     if(type==='warning_new'){appendWarning(payload,true);return;}
     if(type==='channels')   {channels=payload;renderCtrl();return;}
   };
-  ws.onclose=()=>{setStatus(false);setTimeout(connectWS,3000);};
+  ws.onclose=()=>{setStatus(false);setTimeout(()=>connectWS(getSessionToken()),3000);};
   ws.onerror=()=>ws.close();
 }
 
@@ -307,7 +321,7 @@ async function loadWarnings(){
   area.innerHTML='<div class="empty">Loading...</div>';
   warnCount=0;
   try{
-    const r=await fetch('/api/warnings',{headers:{Authorization:'Bearer '+dashSecret}});
+    const r=await fetch('/api/warnings',{credentials:'include'});
     const data=await r.json();
     if(!r.ok){area.innerHTML='<div class="empty" style="color:var(--red)">Error loading warnings.</div>';return;}
     if(!data.length){area.innerHTML='<div class="empty">No active warnings.</div>';document.getElementById('warn-count').textContent=0;return;}
@@ -325,7 +339,7 @@ async function loadWarnings(){
 /* ── Control Panel ── */
 async function loadChannels(){
   try{
-    const r=await fetch('/api/channels',{headers:{Authorization:'Bearer '+dashSecret}});
+    const r=await fetch('/api/channels',{credentials:'include'});
     if(r.ok){channels=await r.json();renderCtrl();}
   }catch{}
   renderCtrl();
@@ -383,7 +397,7 @@ function renderCtrl(){
 async function ctrlAction(action,payload,confirm_=false){
   if(confirm_&&!confirm('Are you sure you want to: '+action+'?'))return;
   try{
-    const r=await fetch('/control',{method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+dashSecret},body:JSON.stringify({action,payload})});
+    const r=await fetch('/control',{method:'POST',credentials:'include',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,payload})});
     const d=await r.json();
     if(!r.ok){toast('❌ '+(d.error||'Error'),'err');return;}
     if(action==='lockdown'){lockdownActive=true;}
