@@ -10,14 +10,178 @@ const server   = http.createServer(app);
 const wss      = new WebSocketServer({ server });
 const PORT     = process.env.PORT || 3000;
 const SECRET   = process.env.TRANSCRIPT_SECRET;
-const DASH_PW  = process.env.DASHBOARD_SECRET || SECRET;
 const supabase = createClient(process.env.supabaseUrl, process.env.supabaseKey);
 
-if (!SECRET)                                              { console.error('❌ TRANSCRIPT_SECRET not set!'); process.exit(1); }
-if (!process.env.supabaseUrl || !process.env.supabaseKey) { console.error('❌ Supabase env vars not set!'); process.exit(1); }
+// ── Discord OAuth2 config ─────────────────────────────────────────
+const DISCORD_CLIENT_ID     = process.env.DISCORD_CLIENT_ID;
+const DISCORD_CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET;
+const DISCORD_REDIRECT_URI  = process.env.DISCORD_REDIRECT_URI;   // e.g. https://yourapp.railway.app/auth/callback
+const DISCORD_GUILD_ID      = process.env.GUILD_ID;
+const ALLOWED_ROLE_IDS      = (process.env.ALLOWED_ROLE_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
+// e.g. ALLOWED_ROLE_IDS=1466333274103222292,1466325679380365453
+
+if (!SECRET)                    { console.error('❌ TRANSCRIPT_SECRET not set');    process.exit(1); }
+if (!DISCORD_CLIENT_ID)         { console.error('❌ DISCORD_CLIENT_ID not set');    process.exit(1); }
+if (!DISCORD_CLIENT_SECRET)     { console.error('❌ DISCORD_CLIENT_SECRET not set'); process.exit(1); }
+if (!DISCORD_REDIRECT_URI)      { console.error('❌ DISCORD_REDIRECT_URI not set'); process.exit(1); }
+if (!DISCORD_GUILD_ID)          { console.error('❌ GUILD_ID not set');             process.exit(1); }
+if (!process.env.supabaseUrl)   { console.error('❌ supabaseUrl not set');          process.exit(1); }
 
 app.use(express.json({ limit: '10mb' }));
 
+// ── Session store (in-memory, survives for 6 hours) ───────────────
+const sessions = new Map(); // sessionToken → { userId, username, avatar, expiresAt }
+
+function createSession(userId, username, avatar) {
+    const token = crypto.randomBytes(32).toString('hex');
+    sessions.set(token, { userId, username, avatar, expiresAt: Date.now() + 6 * 60 * 60 * 1000 });
+    // Clean expired sessions
+    for (const [k, v] of sessions) if (v.expiresAt < Date.now()) sessions.delete(k);
+    return token;
+}
+
+function getSession(req) {
+    const raw = req.headers.cookie?.split(';').find(c => c.trim().startsWith('dash_session='));
+    if (!raw) return null;
+    const token = raw.split('=')[1]?.trim();
+    const sess  = sessions.get(token);
+    if (!sess || sess.expiresAt < Date.now()) { if (sess) sessions.delete(token); return null; }
+    return sess;
+}
+
+function requireAuth(req, res, next) {
+    if (getSession(req)) return next();
+    res.redirect('/auth/login');
+}
+
+// ── OAuth2 routes ─────────────────────────────────────────────────
+
+// Step 1 — redirect to Discord
+app.get('/auth/login', (req, res) => {
+    const state  = crypto.randomBytes(16).toString('hex');
+    const params = new URLSearchParams({
+        client_id:     DISCORD_CLIENT_ID,
+        redirect_uri:  DISCORD_REDIRECT_URI,
+        response_type: 'code',
+        scope:         'identify guilds.members.read',
+        state,
+    });
+    res.setHeader('Set-Cookie', `oauth_state=${state}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/`);
+    res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
+});
+
+// Step 2 — Discord redirects back here with ?code=
+app.get('/auth/callback', async (req, res) => {
+    const { code, state } = req.query;
+
+    // Validate state to prevent CSRF
+    const cookieState = req.headers.cookie?.split(';').find(c => c.trim().startsWith('oauth_state='))?.split('=')[1]?.trim();
+    if (!state || state !== cookieState) return res.status(403).send(errorPage('Invalid state — please try again.'));
+
+    try {
+        // Exchange code for access token
+        const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+            body: new URLSearchParams({
+                client_id:     DISCORD_CLIENT_ID,
+                client_secret: DISCORD_CLIENT_SECRET,
+                grant_type:    'authorization_code',
+                code,
+                redirect_uri:  DISCORD_REDIRECT_URI,
+            }),
+        });
+        const tokenData = await tokenRes.json();
+        if (!tokenData.access_token) return res.status(401).send(errorPage('Failed to get access token from Discord.'));
+
+        // Fetch user identity
+        const userRes  = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
+        const userData = await userRes.json();
+        if (!userData.id) return res.status(401).send(errorPage('Failed to fetch user from Discord.'));
+
+        // Fetch guild member to check roles
+        const memberRes  = await fetch(`https://discord.com/api/users/@me/guilds/${DISCORD_GUILD_ID}/member`, { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
+        const memberData = await memberRes.json();
+
+        if (memberRes.status === 404 || memberData.code === 10004) return res.status(403).send(errorPage('You are not a member of the Mafia Market server.'));
+
+        const userRoles = memberData.roles || [];
+        const allowed   = ALLOWED_ROLE_IDS.length === 0 || ALLOWED_ROLE_IDS.some(r => userRoles.includes(r));
+        if (!allowed) return res.status(403).send(errorPage(`You don't have the required role to access this dashboard.`));
+
+        // Create session
+        const sessionToken = createSession(userData.id, userData.username, userData.avatar);
+        const avatar = userData.avatar
+            ? `https://cdn.discordapp.com/avatars/${userData.id}/${userData.avatar}.png`
+            : `https://cdn.discordapp.com/embed/avatars/${parseInt(userData.discriminator || 0) % 5}.png`;
+
+        console.log(`✅ Dashboard login: ${userData.username} (${userData.id})`);
+        res.setHeader('Set-Cookie', [
+            `dash_session=${sessionToken}; HttpOnly; SameSite=Lax; Max-Age=21600; Path=/`,
+            `oauth_state=; HttpOnly; Max-Age=0; Path=/`,
+        ]);
+        res.redirect('/admin');
+    } catch (err) {
+        console.error('❌ OAuth callback error:', err.message);
+        res.status(500).send(errorPage('An error occurred during login. Please try again.'));
+    }
+});
+
+// Logout
+app.get('/auth/logout', (req, res) => {
+    const raw   = req.headers.cookie?.split(';').find(c => c.trim().startsWith('dash_session='));
+    const token = raw?.split('=')[1]?.trim();
+    if (token) sessions.delete(token);
+    res.setHeader('Set-Cookie', 'dash_session=; HttpOnly; Max-Age=0; Path=/');
+    res.redirect('/auth/login');
+});
+
+// ── Admin dashboard — protected ───────────────────────────────────
+app.get('/admin', requireAuth, (req, res) => {
+    const sess = getSession(req);
+    const html = require('fs').readFileSync(__dirname + '/dashboard.html', 'utf8')
+        .replace('__USERNAME__', sess.username)
+        .replace('__AVATAR__',   sess.avatar
+            ? `https://cdn.discordapp.com/avatars/${sess.userId}/${sess.avatar}.png`
+            : `https://cdn.discordapp.com/embed/avatars/0.png`);
+    res.setHeader('Content-Type', 'text/html');
+    res.send(html);
+});
+
+// ── WS — bot auth uses SECRET, dashboard uses session cookie ──────
+wss.on('connection', (ws, req) => {
+    ws._role = null;
+    ws.on('message', (raw) => {
+        try {
+            const { type, payload } = JSON.parse(raw);
+            if (type === 'auth') {
+                // Bot authenticates with TRANSCRIPT_SECRET
+                if (payload?.secret === SECRET) {
+                    ws._role = 'bot';
+                    ws.send(JSON.stringify({ type: 'auth_ok', role: 'bot' }));
+                    return;
+                }
+                // Dashboard authenticates with its session token
+                const sessToken = payload?.sessionToken;
+                if (sessToken) {
+                    const sess = sessions.get(sessToken);
+                    if (sess && sess.expiresAt > Date.now()) {
+                        ws._role = 'dashboard';
+                        ws.send(JSON.stringify({ type: 'catchup_logs',   payload: logBuffer   }));
+                        ws.send(JSON.stringify({ type: 'catchup_alerts', payload: alertBuffer }));
+                        ws.send(JSON.stringify({ type: 'auth_ok', role: 'dashboard' }));
+                        return;
+                    }
+                }
+                ws.send(JSON.stringify({ type: 'auth_fail' }));
+                ws.close();
+            }
+            if (type === 'control_result' && ws._role === 'bot') broadcast('control_result', payload);
+        } catch {}
+    });
+});
+
+// ── In-memory buffers ─────────────────────────────────────────────
 let visitCount  = 0;
 const serverStart = Date.now();
 const logBuffer   = [];
@@ -33,46 +197,13 @@ function broadcast(type, payload) {
         if (ws.readyState === WebSocket.OPEN && ws._role === 'dashboard') ws.send(msg);
 }
 
-function broadcastAll(type, payload) {
-    const msg = JSON.stringify({ type, payload });
-    for (const ws of wss.clients)
-        if (ws.readyState === WebSocket.OPEN && ws._role) ws.send(msg);
-}
-
-wss.on('connection', (ws) => {
-    ws._role = null; // 'dashboard' | 'bot'
-    ws.on('message', (raw) => {
-        try {
-            const { type, payload } = JSON.parse(raw);
-            if (type === 'auth') {
-                if (payload?.secret === DASH_PW) {
-                    ws._role = 'dashboard';
-                    ws.send(JSON.stringify({ type: 'catchup_logs',   payload: logBuffer   }));
-                    ws.send(JSON.stringify({ type: 'catchup_alerts', payload: alertBuffer }));
-                    ws.send(JSON.stringify({ type: 'auth_ok', role: 'dashboard' }));
-                } else if (payload?.secret === SECRET) {
-                    ws._role = 'bot';
-                    ws.send(JSON.stringify({ type: 'auth_ok', role: 'bot' }));
-                } else {
-                    ws.send(JSON.stringify({ type: 'auth_fail' }));
-                    ws.close();
-                }
-            }
-            // Bot sends control results back
-            if (type === 'control_result' && ws._role === 'bot') {
-                broadcast('control_result', payload);
-            }
-        } catch {}
-    });
-});
-
+// ── Bot ingest endpoints ──────────────────────────────────────────
 app.post('/log', (req, res) => {
     if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
     const { level = 'info', msg } = req.body;
     if (!msg) return res.status(400).json({ error: 'Missing msg' });
     const entry = { ts: new Date().toISOString(), level, msg };
-    pushLog(entry);
-    broadcast('log', entry);
+    pushLog(entry); broadcast('log', entry);
     res.json({ ok: true });
 });
 
@@ -81,66 +212,54 @@ app.post('/alert', (req, res) => {
     const { severity = 'medium', msg } = req.body;
     if (!msg) return res.status(400).json({ error: 'Missing msg' });
     const entry = { ts: new Date().toISOString(), severity, msg };
-    pushAlert(entry);
-    broadcast('alert', entry);
+    pushAlert(entry); broadcast('alert', entry);
     res.json({ ok: true });
 });
 
-app.get('/admin', (req, res) => {
-    res.setHeader('Content-Type', 'text/html');
-    res.send(require('fs').readFileSync(__dirname + '/dashboard.html', 'utf8'));
+app.post('/warning', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
+    const entry = req.body;
+    if (!entry?.user_id) return res.status(400).json({ error: 'Missing user_id' });
+    broadcast('warning_new', entry);
+    res.json({ ok: true });
 });
 
-app.get('/api/warnings', async (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`) return res.status(401).json({ error: 'Unauthorized' });
+// ── Dashboard API — session protected ────────────────────────────
+function dashAuth(req, res, next) {
+    if (getSession(req)) return next();
+    res.status(401).json({ error: 'Unauthorized' });
+}
+
+app.get('/api/warnings', dashAuth, async (req, res) => {
     const { data, error } = await supabase.from('Warnings').select('*').order('created_at', { ascending: false });
     if (error) return res.status(500).json({ error: error.message });
     res.json(data ?? []);
 });
 
-app.get('/api/chart/:type', async (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`) return res.status(401).json({ error: 'Unauthorized' });
-    const type  = req.params.type;
-    const now   = new Date();
-    const days  = 30;
-    const since = new Date(now - days * 86400000).toISOString();
-    const labels = [];
-    for (let i = days-1; i >= 0; i--) {
-        const d = new Date(now); d.setDate(d.getDate() - i);
-        labels.push(d.toLocaleDateString('en-GB', { month: 'short', day: 'numeric' }));
+app.get('/api/channels', dashAuth, (req, res) => res.json(channelCache));
+
+app.post('/control', dashAuth, (req, res) => {
+    const { action, payload } = req.body;
+    if (!action) return res.status(400).json({ error: 'Missing action' });
+    const msg = JSON.stringify({ type: 'control', payload: { action, payload } });
+    let sent = 0;
+    for (const ws of wss.clients) {
+        if (ws.readyState === WebSocket.OPEN && ws._role === 'bot') { ws.send(msg); sent++; }
     }
-    function bucket(rows, field) {
-        const c = new Array(days).fill(0);
-        for (const r of (rows||[])) { const idx = days-1-Math.floor((now-new Date(r[field]))/86400000); if (idx>=0&&idx<days) c[idx]++; }
-        return c;
-    }
-    try {
-        if (type === 'joins') {
-            const [{ data: j },{ data: l }] = await Promise.all([
-                supabase.from('Member Events').select('created_at').eq('event_type','join').gte('created_at',since),
-                supabase.from('Member Events').select('created_at').eq('event_type','leave').gte('created_at',since),
-            ]);
-            return res.json({ labels, datasets: [
-                { label:'Joins',  data:bucket(j,'created_at'), borderColor:'#23d18b', backgroundColor:'rgba(35,209,139,0.15)', fill:true, tension:0.4, pointBackgroundColor:'#23d18b' },
-                { label:'Leaves', data:bucket(l,'created_at'), borderColor:'#e06c75', backgroundColor:'rgba(224,108,117,0.15)', fill:true, tension:0.4, pointBackgroundColor:'#e06c75' },
-            ]});
-        }
-        if (type === 'tickets') {
-            const { data: t } = await supabase.from('Tickets').select('created_at').gte('created_at',since);
-            return res.json({ labels, datasets: [{ label:'Tickets', data:bucket(t,'created_at'), borderColor:'#61afef', backgroundColor:'rgba(97,175,239,0.15)', fill:true, tension:0.4, pointBackgroundColor:'#61afef' }] });
-        }
-        if (type === 'messages') {
-            const { data: m } = await supabase.from('Message Stats').select('created_at').gte('created_at',since);
-            return res.json({ labels, datasets: [{ label:'Messages', data:bucket(m,'created_at'), borderColor:'#c678dd', backgroundColor:'rgba(198,120,221,0.15)', fill:true, tension:0.4, pointBackgroundColor:'#c678dd' }] });
-        }
-        if (type === 'warnings') {
-            const { data: w } = await supabase.from('Warnings').select('created_at').gte('created_at',since);
-            return res.json({ labels, datasets: [{ label:'Warnings', data:bucket(w,'created_at'), borderColor:'#e5c07b', backgroundColor:'rgba(229,192,123,0.15)', fill:true, tension:0.4, pointBackgroundColor:'#e5c07b' }] });
-        }
-        res.status(400).json({ error: 'Unknown chart type' });
-    } catch (err) { res.status(500).json({ error: err.message }); }
+    if (sent === 0) return res.status(503).json({ error: 'Bot not connected' });
+    res.json({ ok: true, action });
 });
 
+// ── Channel cache ─────────────────────────────────────────────────
+let channelCache = [];
+app.post('/api/channels', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
+    channelCache = req.body.channels || [];
+    broadcast('channels', channelCache);
+    res.json({ ok: true });
+});
+
+// ── Transcript endpoints ──────────────────────────────────────────
 app.post('/transcript', async (req, res) => {
     if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
     const { html, ticketNum, ticketType, authorId, authorTag, claimerTag, closedAt } = req.body;
@@ -169,54 +288,13 @@ app.get('/', async (req, res) => {
     res.json({ status:'online', active_transcripts:count??0, transcript_views:visitCount, uptime_seconds:Math.floor(process.uptime()), started_at:new Date(serverStart).toISOString() });
 });
 
-function notFoundPage(title,msg) {
+// ── Helpers ───────────────────────────────────────────────────────
+function notFoundPage(title, msg) {
     return `<!DOCTYPE html><html><head><title>${title}</title></head><body style="background:#313338;color:#dcddde;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:64px;margin-bottom:16px">🔍</div><h1 style="font-size:24px;margin-bottom:8px;color:#f2f3f5">${title}</h1><p style="color:#72767d">${msg}</p></div></body></html>`;
 }
 
-app.post('/warning', (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
-    const entry = req.body;
-    if (!entry?.user_id) return res.status(400).json({ error: 'Missing user_id' });
-    broadcast('warning_new', entry);
-    res.json({ ok: true });
-});
-
-// ── Control panel — bot command relay ────────────────────────────
-// The dashboard POSTs here, server forwards to bot via WS broadcast
-// Bot must listen for 'control' WS messages (handled in bot.js)
-
-app.post('/control', (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`)
-        return res.status(401).json({ error: 'Unauthorized' });
-    const { action, payload } = req.body;
-    if (!action) return res.status(400).json({ error: 'Missing action' });
-
-    // Forward to bot WS clients only
-    const msg = JSON.stringify({ type: 'control', payload: { action, payload } });
-    let sent = 0;
-    for (const ws of wss.clients) {
-        if (ws.readyState === WebSocket.OPEN && ws._role === 'bot') {
-            ws.send(msg);
-            sent++;
-        }
-    }
-    if (sent === 0) return res.status(503).json({ error: 'Bot not connected' });
-    res.json({ ok: true, action });
-});
-
-// GET /api/channels — bot pushes channel list here on startup, cached
-let channelCache = [];
-app.post('/api/channels', (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${SECRET}`)
-        return res.status(401).json({ error: 'Unauthorized' });
-    channelCache = req.body.channels || [];
-    broadcast('channels', channelCache);
-    res.json({ ok: true });
-});
-app.get('/api/channels', (req, res) => {
-    if (req.headers['authorization'] !== `Bearer ${DASH_PW}`)
-        return res.status(401).json({ error: 'Unauthorized' });
-    res.json(channelCache);
-});
+function errorPage(msg) {
+    return `<!DOCTYPE html><html><head><title>Access Denied</title></head><body style="background:#1e1f22;color:#dbdee1;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;flex-direction:column;gap:16px"><div style="font-size:64px">🔒</div><h1 style="color:#f2f3f5;font-size:22px">Access Denied</h1><p style="color:#80848e;max-width:360px;text-align:center">${msg}</p><a href="/auth/login" style="background:#5865f2;color:#fff;padding:10px 24px;border-radius:6px;text-decoration:none;font-weight:600">Try Again</a></body></html>`;
+}
 
 server.listen(PORT, () => console.log(`📄 Server running on port ${PORT}`));
