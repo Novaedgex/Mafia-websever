@@ -30,23 +30,37 @@ function pushAlert(e) { alertBuffer.push(e); if (alertBuffer.length > MAX_BUF) a
 function broadcast(type, payload) {
     const msg = JSON.stringify({ type, payload });
     for (const ws of wss.clients)
-        if (ws.readyState === WebSocket.OPEN && ws._authed) ws.send(msg);
+        if (ws.readyState === WebSocket.OPEN && ws._role === 'dashboard') ws.send(msg);
+}
+
+function broadcastAll(type, payload) {
+    const msg = JSON.stringify({ type, payload });
+    for (const ws of wss.clients)
+        if (ws.readyState === WebSocket.OPEN && ws._role) ws.send(msg);
 }
 
 wss.on('connection', (ws) => {
-    ws._authed = false;
+    ws._role = null; // 'dashboard' | 'bot'
     ws.on('message', (raw) => {
         try {
             const { type, payload } = JSON.parse(raw);
             if (type === 'auth') {
                 if (payload?.secret === DASH_PW) {
-                    ws._authed = true;
+                    ws._role = 'dashboard';
                     ws.send(JSON.stringify({ type: 'catchup_logs',   payload: logBuffer   }));
                     ws.send(JSON.stringify({ type: 'catchup_alerts', payload: alertBuffer }));
+                    ws.send(JSON.stringify({ type: 'auth_ok', role: 'dashboard' }));
+                } else if (payload?.secret === SECRET) {
+                    ws._role = 'bot';
+                    ws.send(JSON.stringify({ type: 'auth_ok', role: 'bot' }));
                 } else {
                     ws.send(JSON.stringify({ type: 'auth_fail' }));
                     ws.close();
                 }
+            }
+            // Bot sends control results back
+            if (type === 'control_result' && ws._role === 'bot') {
+                broadcast('control_result', payload);
             }
         } catch {}
     });
@@ -159,6 +173,14 @@ function notFoundPage(title,msg) {
     return `<!DOCTYPE html><html><head><title>${title}</title></head><body style="background:#313338;color:#dcddde;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0"><div style="text-align:center"><div style="font-size:64px;margin-bottom:16px">🔍</div><h1 style="font-size:24px;margin-bottom:8px;color:#f2f3f5">${title}</h1><p style="color:#72767d">${msg}</p></div></body></html>`;
 }
 
+app.post('/warning', (req, res) => {
+    if (req.headers['authorization'] !== `Bearer ${SECRET}`) return res.status(401).json({ error: 'Unauthorized' });
+    const entry = req.body;
+    if (!entry?.user_id) return res.status(400).json({ error: 'Missing user_id' });
+    broadcast('warning_new', entry);
+    res.json({ ok: true });
+});
+
 // ── Control panel — bot command relay ────────────────────────────
 // The dashboard POSTs here, server forwards to bot via WS broadcast
 // Bot must listen for 'control' WS messages (handled in bot.js)
@@ -169,8 +191,16 @@ app.post('/control', (req, res) => {
     const { action, payload } = req.body;
     if (!action) return res.status(400).json({ error: 'Missing action' });
 
-    // Broadcast to bot's WS connection (bot connects as a client)
-    broadcast('control', { action, payload });
+    // Forward to bot WS clients only
+    const msg = JSON.stringify({ type: 'control', payload: { action, payload } });
+    let sent = 0;
+    for (const ws of wss.clients) {
+        if (ws.readyState === WebSocket.OPEN && ws._role === 'bot') {
+            ws.send(msg);
+            sent++;
+        }
+    }
+    if (sent === 0) return res.status(503).json({ error: 'Bot not connected' });
     res.json({ ok: true, action });
 });
 
