@@ -1,0 +1,291 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Mafia Market — Admin Dashboard</title>
+<style>
+:root{--bg:#0d0f12;--panel:#111418;--border:#1e2228;--header:#161a1f;--green:#23d18b;--yellow:#e5c07b;--red:#e06c75;--blue:#61afef;--purple:#c678dd;--cyan:#56b6c2;--dim:#4b5263;--text:#abb2bf;--bright:#dde1e8}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Code','Courier New',monospace;font-size:13px;height:100vh;overflow:hidden}
+#login-overlay{position:fixed;inset:0;background:var(--bg);display:flex;align-items:center;justify-content:center;z-index:100;flex-direction:column;gap:16px}
+#login-overlay h1{color:var(--bright);font-size:22px;letter-spacing:3px}
+#login-overlay input{background:var(--panel);border:1px solid var(--border);color:var(--bright);padding:10px 16px;border-radius:6px;font-family:inherit;font-size:14px;width:300px;outline:none}
+#login-overlay input:focus{border-color:var(--blue)}
+#login-overlay button{background:var(--blue);color:#000;border:none;padding:10px 28px;border-radius:6px;font-family:inherit;font-size:14px;font-weight:bold;cursor:pointer;width:300px}
+#login-overlay button:hover{opacity:.85}
+#login-error{color:var(--red);font-size:12px;display:none}
+#app{display:none;height:100vh;flex-direction:column}
+#topbar{background:var(--header);border-bottom:1px solid var(--border);padding:10px 20px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+#topbar .logo{color:var(--bright);font-size:15px;font-weight:bold;letter-spacing:1px}
+.badge{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:2px 8px;font-size:11px;color:var(--dim)}
+.status-dot{width:8px;height:8px;border-radius:50%;background:var(--dim);margin-left:auto;transition:background .3s}
+.status-dot.online{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-label{font-size:11px;color:var(--dim)}
+#grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:1px;flex:1;overflow:hidden;background:var(--border)}
+.panel{background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
+.panel-header{background:var(--header);padding:8px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0}
+.panel-header .title{color:var(--bright);font-size:12px;font-weight:bold;letter-spacing:.5px}
+.panel-header .count{margin-left:auto;background:var(--border);border-radius:10px;padding:1px 8px;font-size:10px;color:var(--dim)}
+.clear-btn{background:none;border:1px solid var(--border);color:var(--dim);border-radius:4px;padding:1px 8px;font-size:10px;cursor:pointer;font-family:inherit}
+.clear-btn:hover{border-color:var(--red);color:var(--red)}
+.scroll-area{flex:1;overflow-y:auto;padding:6px 0}
+.scroll-area::-webkit-scrollbar{width:4px}
+.scroll-area::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.log-line{display:flex;align-items:baseline;gap:8px;padding:2px 14px;line-height:1.7}
+.log-line:hover{background:rgba(255,255,255,.02)}
+.log-ts{color:var(--dim);font-size:10px;flex-shrink:0}
+.log-msg{white-space:pre-wrap;word-break:break-word}
+.log-line.success .log-msg{color:var(--green)}
+.log-line.warn .log-msg{color:var(--yellow)}
+.log-line.error .log-msg{color:var(--red)}
+.log-line.debug .log-msg{color:var(--dim)}
+.log-line.system .log-msg{color:var(--cyan)}
+.log-line.event .log-msg{color:var(--purple)}
+.log-line.info .log-msg{color:var(--text)}
+.alert-line{display:flex;align-items:flex-start;gap:10px;padding:6px 14px;border-bottom:1px solid rgba(255,255,255,.03)}
+.alert-line:hover{background:rgba(255,255,255,.02)}
+.alert-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:5px}
+.alert-dot.low{background:#23d18b;box-shadow:0 0 4px #23d18b}
+.alert-dot.medium{background:#e5c07b;box-shadow:0 0 4px #e5c07b}
+.alert-dot.high{background:#e06c75;box-shadow:0 0 4px #e06c75}
+.alert-dot.critical{background:#c678dd;box-shadow:0 0 6px #c678dd;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.alert-body{flex:1;min-width:0}
+.alert-meta{display:flex;gap:8px;align-items:center;margin-bottom:2px}
+.alert-severity{font-size:10px;font-weight:bold;text-transform:uppercase;letter-spacing:.5px}
+.alert-severity.low{color:#23d18b}.alert-severity.medium{color:#e5c07b}.alert-severity.high{color:#e06c75}.alert-severity.critical{color:#c678dd}
+.alert-ts{color:var(--dim);font-size:10px}
+.alert-msg{color:var(--text);white-space:pre-wrap;word-break:break-word;font-size:12px}
+.warn-line{display:flex;align-items:flex-start;gap:10px;padding:6px 14px;border-bottom:1px solid rgba(255,255,255,.03)}
+.warn-line:hover{background:rgba(255,255,255,.02)}
+.warn-num{color:var(--dim);font-size:10px;flex-shrink:0;min-width:22px;margin-top:2px}
+.warn-body{flex:1;min-width:0}
+.warn-user{color:var(--yellow);font-size:12px;font-weight:bold}
+.warn-reason{color:var(--text);font-size:11px;margin-top:1px}
+.warn-meta{color:var(--dim);font-size:10px;margin-top:1px}
+.warn-total{background:var(--red);color:#fff;border-radius:10px;padding:0 6px;font-size:10px;font-weight:bold;flex-shrink:0;margin-top:2px}
+.chart-tabs{display:flex;gap:4px;padding:6px 10px;background:var(--header);border-bottom:1px solid var(--border);flex-shrink:0}
+.chart-tab{background:none;border:1px solid var(--border);color:var(--dim);padding:3px 12px;border-radius:4px;font-family:inherit;font-size:11px;cursor:pointer}
+.chart-tab.active{background:var(--blue);border-color:var(--blue);color:#000;font-weight:bold}
+.chart-tab:hover:not(.active){border-color:var(--text);color:var(--text)}
+#chart-container{flex:1;overflow:hidden;padding:12px;position:relative}
+#chart-container canvas{width:100%!important;height:100%!important}
+.empty-state{color:var(--dim);font-size:12px;text-align:center;padding:24px}
+@keyframes flash{0%{background:rgba(97,175,239,.12)}100%{background:transparent}}
+.flash{animation:flash .6s ease-out}
+</style>
+</head>
+<body>
+
+<div id="login-overlay">
+  <h1>⚡ MAFIA MARKET</h1>
+  <div style="color:var(--dim);font-size:11px;letter-spacing:2px;margin-bottom:8px">ADMIN DASHBOARD</div>
+  <input type="password" id="pw-input" placeholder="Dashboard password..." autocomplete="off">
+  <button onclick="doLogin()">Access Dashboard</button>
+  <div id="login-error">⚠ Invalid password — try again</div>
+</div>
+
+<div id="app">
+  <div id="topbar">
+    <div class="logo">⚡ MAFIA MARKET</div>
+    <div class="badge">ADMIN DASHBOARD</div>
+    <div class="badge" id="uptime-badge">session: 0s</div>
+    <div class="status-dot" id="status-dot"></div>
+    <div class="status-label" id="status-label">connecting...</div>
+  </div>
+  <div id="grid">
+    <div class="panel">
+      <div class="panel-header">
+        <span style="color:var(--green)">●</span>
+        <span class="title">TERMINAL — Bot Console</span>
+        <span class="count" id="log-count">0</span>
+        <button class="clear-btn" onclick="clearLogs()">clear</button>
+      </div>
+      <div class="scroll-area" id="log-area"><div class="empty-state">Waiting for bot logs...</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span style="color:var(--red)">●</span>
+        <span class="title">ALERTS — AutoMod & Mod Actions</span>
+        <span class="count" id="alert-count">0</span>
+        <button class="clear-btn" onclick="clearAlerts()">clear</button>
+      </div>
+      <div class="scroll-area" id="alert-area"><div class="empty-state">No alerts yet...</div></div>
+    </div>
+    <div class="panel">
+      <div class="panel-header">
+        <span style="color:var(--yellow)">●</span>
+        <span class="title">WARNINGS — Member Warning Log</span>
+        <span class="count" id="warn-count">0</span>
+        <button class="clear-btn" onclick="loadWarnings()">↻ refresh</button>
+      </div>
+      <div class="scroll-area" id="warn-area"><div class="empty-state">Loading warnings...</div></div>
+    </div>
+    <div class="panel" style="display:flex;flex-direction:column">
+      <div class="panel-header">
+        <span style="color:var(--purple)">●</span>
+        <span class="title">CHARTS — Activity Overview</span>
+        <button class="clear-btn" onclick="loadChart(activeChart)" style="margin-left:auto">↻ refresh</button>
+      </div>
+      <div class="chart-tabs">
+        <button class="chart-tab active" onclick="switchChart('joins',this)">Joins/Leaves</button>
+        <button class="chart-tab" onclick="switchChart('tickets',this)">Tickets</button>
+        <button class="chart-tab" onclick="switchChart('messages',this)">Messages</button>
+        <button class="chart-tab" onclick="switchChart('warnings',this)">Warnings</button>
+      </div>
+      <div id="chart-container"><canvas id="myChart"></canvas></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<script>
+let ws, logCount=0, alertCount=0, activeChart='joins', chartInstance=null, dashSecret='', sessionStart=Date.now();
+const MAX_DOM=300;
+
+document.getElementById('pw-input').addEventListener('keydown',e=>{if(e.key==='Enter')doLogin();});
+
+function doLogin(){
+  dashSecret=document.getElementById('pw-input').value;
+  document.getElementById('login-error').style.display='none';
+  connectWS();
+}
+
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss:':'ws:';
+  ws=new WebSocket(proto+'//'+location.host);
+  ws.onopen=()=>ws.send(JSON.stringify({type:'auth',payload:{secret:dashSecret}}));
+  ws.onmessage=(e)=>{
+    const {type,payload}=JSON.parse(e.data);
+    if(type==='auth_fail'){document.getElementById('login-error').style.display='block';ws.close();return;}
+    if(type==='catchup_logs'){
+      document.getElementById('login-overlay').style.display='none';
+      document.getElementById('app').style.display='flex';
+      setStatus(true);
+      document.getElementById('log-area').innerHTML='';
+      payload.forEach(e=>appendLog(e,false));
+      loadWarnings();loadChart(activeChart);startTick();
+      return;
+    }
+    if(type==='catchup_alerts'){payload.forEach(e=>appendAlert(e,false));return;}
+    if(type==='log'){appendLog(payload,true);return;}
+    if(type==='alert'){appendAlert(payload,true);return;}
+    if(type==='warning_update'){loadWarnings();return;}
+  };
+  ws.onclose=()=>{setStatus(false);setTimeout(connectWS,3000);};
+  ws.onerror=()=>ws.close();
+}
+
+function setStatus(online){
+  document.getElementById('status-dot').className='status-dot'+(online?' online':'');
+  document.getElementById('status-label').textContent=online?'live':'reconnecting...';
+}
+
+function startTick(){
+  sessionStart=Date.now();
+  setInterval(()=>{
+    const s=Math.floor((Date.now()-sessionStart)/1000);
+    const h=Math.floor(s/3600),m=Math.floor((s%3600)/60),ss=s%60;
+    document.getElementById('uptime-badge').textContent='session: '+(h?h+'h ':'')+( m?m+'m ':'')+ss+'s';
+  },1000);
+}
+
+function classifyLog(msg){
+  if(/✅|saved|online|ready|sent|loaded|cleared|reset|registered/i.test(msg)) return 'success';
+  if(/❌|error|fail|crash/i.test(msg)) return 'error';
+  if(/⚠|warn/i.test(msg)) return 'warn';
+  if(/\[.*\]/.test(msg)) return 'system';
+  if(/📦|🗓|🔗|🎫|📄|💰|🤖/.test(msg)) return 'event';
+  return 'info';
+}
+
+function fmtTs(iso){return new Date(iso).toLocaleTimeString('en-GB',{hour12:false});}
+
+function appendLog(entry,flash){
+  const area=document.getElementById('log-area');
+  const empty=area.querySelector('.empty-state');if(empty)empty.remove();
+  const level=entry.level!=='info'?entry.level:classifyLog(entry.msg);
+  const el=document.createElement('div');
+  el.className='log-line '+level+(flash?' flash':'');
+  el.innerHTML='<span class="log-ts">'+fmtTs(entry.ts)+'</span><span class="log-msg">'+esc(entry.msg)+'</span>';
+  area.appendChild(el);
+  while(area.children.length>MAX_DOM)area.removeChild(area.firstChild);
+  document.getElementById('log-count').textContent=++logCount;
+  if(flash)area.scrollTop=area.scrollHeight;
+}
+
+function clearLogs(){document.getElementById('log-area').innerHTML='<div class="empty-state">Terminal cleared.</div>';logCount=0;document.getElementById('log-count').textContent=0;}
+
+function appendAlert(entry,flash){
+  const area=document.getElementById('alert-area');
+  const empty=area.querySelector('.empty-state');if(empty)empty.remove();
+  const sev=entry.severity||'medium';
+  const el=document.createElement('div');
+  el.className='alert-line'+(flash?' flash':'');
+  el.innerHTML='<div class="alert-dot '+sev+'"></div><div class="alert-body"><div class="alert-meta"><span class="alert-severity '+sev+'">'+sev+'</span><span class="alert-ts">'+fmtTs(entry.ts)+'</span></div><div class="alert-msg">'+esc(entry.msg)+'</div></div>';
+  area.appendChild(el);
+  while(area.children.length>MAX_DOM)area.removeChild(area.firstChild);
+  document.getElementById('alert-count').textContent=++alertCount;
+  if(flash)area.scrollTop=area.scrollHeight;
+}
+
+function clearAlerts(){document.getElementById('alert-area').innerHTML='<div class="empty-state">Alerts cleared.</div>';alertCount=0;document.getElementById('alert-count').textContent=0;}
+
+async function loadWarnings(){
+  const area=document.getElementById('warn-area');
+  area.innerHTML='<div class="empty-state">Loading...</div>';
+  try{
+    const r=await fetch('/api/warnings',{headers:{Authorization:'Bearer '+dashSecret}});
+    const data=await r.json();
+    if(!r.ok){area.innerHTML='<div class="empty-state" style="color:var(--red)">Error loading warnings.</div>';return;}
+    const grouped={};
+    for(const w of data){if(!grouped[w.user_id])grouped[w.user_id]={tag:w.user_tag||w.user_id,warnings:[]};grouped[w.user_id].warnings.push(w);}
+    if(!Object.keys(grouped).length){area.innerHTML='<div class="empty-state">No active warnings.</div>';document.getElementById('warn-count').textContent=0;return;}
+    area.innerHTML='';let total=0;
+    for(const[uid,info]of Object.entries(grouped)){
+      info.warnings.forEach((w,i)=>{
+        const el=document.createElement('div');el.className='warn-line';
+        el.innerHTML='<div class="warn-num">#'+(i+1)+'</div><div class="warn-body"><div style="display:flex;align-items:center;gap:8px"><span class="warn-user">'+esc(info.tag)+'</span></div><div class="warn-reason">'+esc(w.reason)+'</div><div class="warn-meta">by '+esc(w.moderator_tag||'AutoMod')+' · '+fmtTs(w.created_at)+'</div></div><div class="warn-total">'+info.warnings.length+'</div>';
+        area.appendChild(el);total++;
+      });
+    }
+    document.getElementById('warn-count').textContent=total;
+  }catch{area.innerHTML='<div class="empty-state" style="color:var(--red)">Failed to load.</div>';}
+}
+
+function switchChart(type,btn){
+  document.querySelectorAll('.chart-tab').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+  loadChart(type);
+}
+
+async function loadChart(type){
+  activeChart=type;
+  try{
+    const r=await fetch('/api/chart/'+type,{headers:{Authorization:'Bearer '+dashSecret}});
+    if(!r.ok)return;
+    renderChart(await r.json());
+  }catch{}
+}
+
+function renderChart(data){
+  const ctx=document.getElementById('myChart');
+  if(chartInstance){chartInstance.destroy();chartInstance=null;}
+  chartInstance=new Chart(ctx,{
+    type:'line',data:{labels:data.labels,datasets:data.datasets},
+    options:{
+      responsive:true,maintainAspectRatio:false,animation:{duration:300},
+      plugins:{legend:{labels:{color:'#abb2bf',font:{family:'Cascadia Code,monospace',size:11}}}},
+      scales:{
+        x:{ticks:{color:'#4b5263',font:{size:10}},grid:{color:'rgba(255,255,255,0.04)'}},
+        y:{ticks:{color:'#4b5263',precision:0,font:{size:10}},grid:{color:'rgba(255,255,255,0.06)'},beginAtZero:true}
+      }
+    }
+  });
+}
+
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
+</script>
+</body>
+</html>
