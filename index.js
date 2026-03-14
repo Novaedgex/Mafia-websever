@@ -152,10 +152,13 @@ app.get('/auth/logout', (req, res) => {
 
 // ── Admin dashboard — protected ───────────────────────────────────
 app.get('/admin', requireAuth, (req, res) => {
-    const sess = getSession(req);
-    const html = require('fs').readFileSync(__dirname + '/dashboard.html', 'utf8')
+    const raw   = req.headers.cookie?.split(';').find(c => c.trim().startsWith('dash_session='));
+    const token = raw?.split('=')[1]?.trim();
+    const sess  = getSession(req);
+    const html  = require('fs').readFileSync(__dirname + '/dashboard.html', 'utf8')
+        .replace('__SESSION_TOKEN__', token || '')
         .replace('__USERNAME__', sess.username)
-        .replace('__AVATAR__',   sess.avatar
+        .replace('__AVATAR__', sess.avatar
             ? `https://cdn.discordapp.com/avatars/${sess.userId}/${sess.avatar}.png`
             : `https://cdn.discordapp.com/embed/avatars/0.png`);
     res.setHeader('Content-Type', 'text/html');
