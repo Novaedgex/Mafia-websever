@@ -39,20 +39,6 @@ body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Co
 
 /* ── Desktop: 2x2 grid ── */
 #grid{display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:1px;flex:1;overflow:hidden;background:var(--border)}
-
-/* ── Mobile: single panel + tab bar ── */
-@media(max-width:700px){
-  body{font-size:14px}
-  #topbar{height:48px;padding:0 12px}
-  .logo{font-size:13px}
-  .tbadge{display:none}
-  #session-badge{display:none}
-  #user-name{display:none}
-  #grid{display:flex;flex-direction:column;overflow:hidden}
-  .panel{display:none!important;flex:1}
-  .panel.active{display:flex!important}
-  #tab-bar{display:flex}
-}
 #tab-bar{display:none;background:var(--header);border-top:1px solid var(--border);height:var(--tab-h);flex-shrink:0}
 .tab-item{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;cursor:pointer;border:none;background:none;color:var(--dim);font-family:inherit;font-size:9px;font-weight:bold;text-transform:uppercase;letter-spacing:.04em;padding:6px 4px;transition:color .15s;position:relative}
 .tab-item.active{color:var(--blue)}
@@ -62,6 +48,20 @@ body{background:var(--bg);color:var(--text);font-family:'Cascadia Code','Fira Co
 
 /* ── Panel base ── */
 .panel{background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
+
+/* ── Mobile override — MUST be after .panel base rule ── */
+@media(max-width:700px){
+  body{font-size:14px}
+  #topbar{height:48px;padding:0 12px}
+  .logo{font-size:13px}
+  .tbadge{display:none}
+  #session-badge{display:none}
+  #user-name{display:none}
+  #grid{display:flex;flex-direction:column;overflow:hidden}
+  .panel{display:none}
+  .panel.active{display:flex;flex:1}
+  #tab-bar{display:flex}
+}
 .ph{background:var(--header);padding:8px 14px;display:flex;align-items:center;gap:8px;border-bottom:1px solid var(--border);flex-shrink:0}
 .ph .title{color:var(--bright);font-size:12px;font-weight:bold;letter-spacing:.5px}
 .ph .cnt{margin-left:auto;background:var(--border);border-radius:10px;padding:1px 8px;font-size:10px;color:var(--dim)}
