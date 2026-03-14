@@ -205,18 +205,15 @@ let ws, logCount=0, alertCount=0, warnCount=0, sessionStart=Date.now();
 let channels=[], lockdownActive=false, raidModeActive=false, invitesLocked=false;
 const MAX_DOM=300;
 
-// Get session token from cookie
-function getSessionToken(){
-  const m=document.cookie.split(';').find(c=>c.trim().startsWith('dash_session='));
-  return m?m.split('=')[1].trim():null;
-}
+// Session token injected server-side — no need to read HttpOnly cookie
+const SESSION_TOKEN = '__SESSION_TOKEN__';
 
-// Auto-connect on page load using session cookie
 window.addEventListener('load',()=>{
-  const tok=getSessionToken();
-  if(!tok){window.location.href='/auth/login';return;}
-  connectWS(tok);
+  if(!SESSION_TOKEN){window.location.href='/auth/login';return;}
+  connectWS(SESSION_TOKEN);
 });
+
+function getSessionToken(){ return SESSION_TOKEN; }
 
 function connectWS(tok){
   const proto=location.protocol==='https:'?'wss:':'ws:';
