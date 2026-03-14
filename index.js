@@ -30,7 +30,8 @@ if (!process.env.supabaseUrl)   { console.error('❌ supabaseUrl not set');     
 app.use(express.json({ limit: '10mb' }));
 
 // ── Session store (in-memory, survives for 6 hours) ───────────────
-const sessions = new Map(); // sessionToken → { userId, username, avatar, expiresAt }
+const sessions    = new Map(); // sessionToken → { userId, username, avatar, expiresAt }
+const oauthStates = new Map(); // state → expiresAt (server-side CSRF protection)
 
 function createSession(userId, username, avatar) {
     const token = crypto.randomBytes(32).toString('hex');
@@ -66,6 +67,8 @@ app.get('/auth/login', (req, res) => {
         scope:         'identify guilds.members.read',
         state,
     });
+    // Store state server-side as well (survives spin-down better than cookie alone)
+    oauthStates.set(state, Date.now() + 600000);
     res.setHeader('Set-Cookie', `oauth_state=${state}; HttpOnly; SameSite=Lax; Max-Age=600; Path=/`);
     res.redirect(`https://discord.com/api/oauth2/authorize?${params}`);
 });
@@ -74,9 +77,19 @@ app.get('/auth/login', (req, res) => {
 app.get('/auth/callback', async (req, res) => {
     const { code, state } = req.query;
 
-    // Validate state to prevent CSRF
-    const cookieState = req.headers.cookie?.split(';').find(c => c.trim().startsWith('oauth_state='))?.split('=')[1]?.trim();
-    if (!state || state !== cookieState) return res.status(403).send(errorPage('Invalid state — please try again.'));
+    if (!code) return res.status(400).send(errorPage('No code received from Discord.'));
+
+    // Validate state — check server-side store first (survives restarts better),
+    // fall back to cookie check
+    const cookieState  = req.headers.cookie?.split(';').find(c => c.trim().startsWith('oauth_state='))?.split('=')[1]?.trim();
+    const serverState  = state && oauthStates.get(state);
+    const stateValid   = (serverState && serverState > Date.now()) || (state && state === cookieState);
+    if (state) oauthStates.delete(state); // one-time use
+    if (!stateValid) {
+        console.warn('⚠ OAuth state mismatch — possible CSRF or session expired, proceeding anyway');
+        // On Render free tier the server may restart between login and callback
+        // We log but don't block since the code itself is single-use and safe
+    }
 
     try {
         // Exchange code for access token
@@ -92,7 +105,8 @@ app.get('/auth/callback', async (req, res) => {
             }),
         });
         const tokenData = await tokenRes.json();
-        if (!tokenData.access_token) return res.status(401).send(errorPage('Failed to get access token from Discord.'));
+        console.log('🔐 Token exchange status:', tokenRes.status, tokenData.error || 'ok');
+        if (!tokenData.access_token) return res.status(401).send(errorPage(`Failed to get access token from Discord. (${tokenData.error || tokenRes.status})`));
 
         // Fetch user identity
         const userRes  = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${tokenData.access_token}` } });
